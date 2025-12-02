@@ -1,4 +1,5 @@
 # app.py (cleaned)
+import json
 import streamlit as st
 from streamlit_folium import st_folium
 import ee
