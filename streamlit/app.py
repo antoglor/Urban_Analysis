@@ -5,17 +5,10 @@ from streamlit_folium import st_folium
 import ee
 import geemap.foliumap as geemap
 import folium
-
-import streamlit as st
-from streamlit_folium import st_folium
-import ee
-import geemap.foliumap as geemap
-import folium
 from google.oauth2 import service_account
 
 service_account_info = json.loads(st.secrets["google_service_account_json"]["value"])
 credentials = service_account.Credentials.from_service_account_info(service_account_info)
-ee.Initialize(credentials=credentials)
 
 
 st.set_page_config(layout="wide")
