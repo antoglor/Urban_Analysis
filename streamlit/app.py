@@ -7,8 +7,24 @@ import geemap.foliumap as geemap
 import folium
 from google.oauth2 import service_account
 
-service_account_info = json.loads(st.secrets["google_service_account_json"]["value"])
+sa = st.secrets["google_service_account"]
+
+service_account_info = {
+    "type": sa["type"],
+    "project_id": sa["project_id"],
+    "private_key_id": sa["private_key_id"],
+    "private_key": sa["private_key"],
+    "client_email": sa["client_email"],
+    "client_id": sa["client_id"],
+    "auth_uri": sa["auth_uri"],
+    "token_uri": sa["token_uri"],
+    "auth_provider_x509_cert_url": sa["auth_provider_x509_cert_url"],
+    "client_x509_cert_url": sa["client_x509_cert_url"],
+    "universe_domain": sa["universe_domain"],
+}
+
 credentials = service_account.Credentials.from_service_account_info(service_account_info)
+
 
 
 st.set_page_config(layout="wide")
