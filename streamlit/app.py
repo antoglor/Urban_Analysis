@@ -23,11 +23,14 @@ service_account_info = {
     "universe_domain": sa["universe_domain"],
 }
 
-credentials = service_account.Credentials.from_service_account_info(service_account_info)
+# Build credentials
+credentials = service_account.Credentials.from_service_account_info(
+    service_account_info,
+    scopes=["https://www.googleapis.com/auth/earthengine"]
+)
 
-
-# Initialize Earth Engine with these credentials
-#ee.Initialize(credentials)
+# 🔥 Initialize Earth Engine with these credentials
+ee.Initialize(credentials)
 
 st.set_page_config(layout="wide")
 st.title("Urban Analysis Tool — Compare built up area for any selected latitude longitude")
