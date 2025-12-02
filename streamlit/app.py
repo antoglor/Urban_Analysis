@@ -27,7 +27,7 @@ credentials = service_account.Credentials.from_service_account_info(service_acco
 
 
 # Initialize Earth Engine with these credentials
-ee.Initialize(credentials)
+#ee.Initialize(credentials)
 
 st.set_page_config(layout="wide")
 st.title("Urban Analysis Tool — Compare built up area for any selected latitude longitude")
