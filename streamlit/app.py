@@ -31,9 +31,6 @@ ee.Initialize(credentials=credentials)
 # -----------------------------------------------
 
 
-# Initialize Earth Engine
-ee.Initialize()
-
 st.set_page_config(layout="wide")
 st.title("Urban Analysis Tool — Compare built up area for any selected latitude longitude")
 st.write("Click to select location, then Run Analysis")
