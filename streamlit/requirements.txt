@@ -1,7 +1,8 @@
-streamlit
-earthengine-api
-geemap
-folium
-streamlit-folium
-matplotlib
-numpy
+streamlit==1.58.0
+earthengine-api==1.7.31
+geemap==0.34.5
+python-box==6.1.0
+folium==0.20.0
+streamlit-folium==0.27.2
+matplotlib==3.11.0
+numpy==2.4.6
