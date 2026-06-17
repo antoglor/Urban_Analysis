@@ -98,6 +98,7 @@ if st.button("Run Analysis"):
     lon = st.session_state.clicked_lon
 
     with st.spinner("Running Earth Engine analysis..."):
+        st.session_state["results"] = run_analysis(lat, lon)
 
         roi = ee.Geometry.Point([lon, lat]).buffer(1000)
 
