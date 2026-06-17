@@ -1,15 +1,26 @@
-# app.py
 import streamlit as st
 from streamlit_folium import st_folium
-import ee
 import folium
-from google.oauth2 import service_account
+import ee
 import matplotlib.pyplot as plt
 import numpy as np
+from google.oauth2 import service_account
 
-# -----------------------------
+# =====================================================
+# CONFIG
+# =====================================================
+
+st.set_page_config(
+    page_title="Urban Analysis Tool",
+    layout="wide"
+)
+
+st.title("Urban Analysis Tool")
+
+# =====================================================
 # EARTH ENGINE AUTH
-# -----------------------------
+# =====================================================
+
 sa = st.secrets["google_service_account"]
 
 credentials = service_account.Credentials.from_service_account_info(
@@ -20,14 +31,16 @@ credentials = service_account.Credentials.from_service_account_info(
 try:
     ee.Initialize(credentials)
 except Exception:
-    ee.Authenticate()
     ee.Initialize()
 
-# -----------------------------
-# EE -> FOLIUM HELPER
-# -----------------------------
+# =====================================================
+# FOLIUM + EE HELPER
+# =====================================================
+
 def add_ee_layer(self, ee_image, vis_params, name):
+
     map_id = ee.Image(ee_image).getMapId(vis_params)
+
     folium.raster_layers.TileLayer(
         tiles=map_id["tile_fetcher"].url_format,
         attr="Google Earth Engine",
@@ -38,12 +51,9 @@ def add_ee_layer(self, ee_image, vis_params, name):
 
 folium.Map.add_ee_layer = add_ee_layer
 
-# -----------------------------
-# PAGE
-# -----------------------------
-st.set_page_config(layout="wide")
-st.title("Urban Analysis Tool")
-st.write("Select a point and run analysis.")
+# =====================================================
+# SESSION STATE
+# =====================================================
 
 if "clicked_lat" not in st.session_state:
     st.session_state.clicked_lat = None
@@ -51,16 +61,259 @@ if "clicked_lat" not in st.session_state:
 if "clicked_lon" not in st.session_state:
     st.session_state.clicked_lon = None
 
-# -----------------------------
-# SELECTOR MAP
-# -----------------------------
-selector_map = folium.Map(
+if "results" not in st.session_state:
+    st.session_state.results = None
+
+# =====================================================
+# ANALYSIS FUNCTION
+# =====================================================
+
+def run_analysis(lat, lon):
+
+    roi = ee.Geometry.Point([lon, lat]).buffer(1000)
+
+    # -------------------------------------------------
+    # BUILDINGS
+    # -------------------------------------------------
+
+    buildings = (
+        ee.FeatureCollection(
+            "projects/sat-io/open-datasets/MSBuildings/India"
+        )
+        .filterBounds(roi)
+        .filter(ee.Filter.gte("area", 16))
+    )
+
+    # -------------------------------------------------
+    # OPEN BUILDINGS HEIGHT
+    # -------------------------------------------------
+
+    height_img = (
+        ee.ImageCollection(
+            "GOOGLE/Research/open-buildings-temporal/v1"
+        )
+        .filterBounds(roi)
+        .select("building_height")
+        .median()
+        .clip(roi)
+    )
+
+    def assign_height(feature):
+
+        stats = height_img.reduceRegion(
+            reducer=ee.Reducer.median(),
+            geometry=feature.geometry(),
+            scale=4,
+            bestEffort=True,
+            maxPixels=1e10
+        )
+
+        height = ee.Number(
+            ee.Algorithms.If(
+                stats.contains("building_height"),
+                stats.get("building_height"),
+                0
+            )
+        )
+
+        floors = height.divide(3).ceil()
+
+        return (
+            feature
+            .set("height_m", height)
+            .set("floors", floors)
+        )
+
+    buildings_h = buildings.map(assign_height)
+
+    # -------------------------------------------------
+    # ROADS
+    # -------------------------------------------------
+
+    roads = (
+        ee.FeatureCollection(
+            "projects/sat-io/open-datasets/GRIP4/South-East-Asia"
+        )
+        .filterBounds(roi)
+    )
+
+    roads_poly = roads.map(
+        lambda f: f.buffer(7)
+    )
+
+    # -------------------------------------------------
+    # VEGETATION
+    # -------------------------------------------------
+
+    s2 = (
+        ee.ImageCollection(
+            "COPERNICUS/S2_SR_HARMONIZED"
+        )
+        .filterBounds(roi)
+        .filterDate(
+            "2024-01-01",
+            "2024-12-31"
+        )
+        .filter(
+            ee.Filter.lt(
+                "CLOUDY_PIXEL_PERCENTAGE",
+                20
+            )
+        )
+        .select(["B4", "B8"])
+        .median()
+        .clip(roi)
+    )
+
+    ndvi = s2.normalizedDifference(
+        ["B8", "B4"]
+    )
+
+    vegetation_mask = ndvi.gt(0.35).unmask(0)
+
+    # -------------------------------------------------
+    # MASKS
+    # -------------------------------------------------
+
+    building_mask = (
+        buildings_h
+        .map(lambda f: f.set("m", 1))
+        .reduceToImage(["m"], ee.Reducer.max())
+        .unmask(0)
+    )
+
+    road_mask = (
+        roads_poly
+        .map(lambda f: f.set("m", 1))
+        .reduceToImage(["m"], ee.Reducer.max())
+        .unmask(0)
+    )
+
+    occupied = (
+        building_mask
+        .Or(road_mask)
+        .Or(vegetation_mask)
+    )
+
+    open_mask = (
+        ee.Image.constant(1)
+        .clip(roi)
+        .updateMask(occupied.Not())
+    )
+
+    # -------------------------------------------------
+    # AREA HELPER
+    # -------------------------------------------------
+
+    def raster_area(mask):
+
+        stats = (
+            mask
+            .multiply(ee.Image.pixelArea())
+            .rename("area")
+            .reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=roi,
+                scale=10,
+                bestEffort=True,
+                maxPixels=1e10
+            )
+        )
+
+        return ee.Number(
+            ee.Algorithms.If(
+                stats.contains("area"),
+                stats.get("area"),
+                0
+            )
+        ).divide(1e4)
+
+    # -------------------------------------------------
+    # AREAS
+    # -------------------------------------------------
+
+    total_area = roi.area().divide(1e4)
+
+    building_area = (
+        buildings.geometry()
+        .area()
+        .divide(1e4)
+    )
+
+    roads_area = (
+        roads_poly.geometry()
+        .area()
+        .divide(1e4)
+    )
+
+    vegetation_area = raster_area(
+        vegetation_mask
+    )
+
+    open_area = raster_area(
+        open_mask.unmask(0)
+    )
+
+    # -------------------------------------------------
+    # BUILDING METRICS
+    # -------------------------------------------------
+
+    avg_height = ee.Number(
+        ee.Algorithms.If(
+            buildings_h.aggregate_mean("height_m"),
+            buildings_h.aggregate_mean("height_m"),
+            0
+        )
+    )
+
+    avg_floors = ee.Number(
+        ee.Algorithms.If(
+            buildings_h.aggregate_mean("floors"),
+            buildings_h.aggregate_mean("floors"),
+            0
+        )
+    )
+
+    builtup_proxy = (
+        building_area.multiply(avg_floors)
+    )
+
+    far_proxy = (
+        builtup_proxy.divide(total_area)
+    )
+
+    return {
+        "lat": lat,
+        "lon": lon,
+        "total": float(total_area.getInfo()),
+        "building": float(building_area.getInfo()),
+        "roads": float(roads_area.getInfo()),
+        "veg": float(vegetation_area.getInfo()),
+        "open": float(open_area.getInfo()),
+        "avg_height": float(avg_height.getInfo()),
+        "avg_floors": float(avg_floors.getInfo()),
+        "builtup": float(builtup_proxy.getInfo()),
+        "far": float(far_proxy.getInfo()),
+        "building_mask": building_mask.selfMask(),
+        "road_mask": road_mask.selfMask(),
+        "veg_mask": vegetation_mask.selfMask(),
+        "open_mask": open_mask.selfMask()
+    }
+
+# =====================================================
+# LOCATION PICKER
+# =====================================================
+
+st.subheader("Select Location")
+
+m = folium.Map(
     location=[28.6, 77.2],
     zoom_start=5,
     tiles="CartoDB positron"
 )
 
-if st.session_state.clicked_lat:
+if st.session_state.clicked_lat is not None:
+
     folium.Circle(
         location=[
             st.session_state.clicked_lat,
@@ -69,309 +322,182 @@ if st.session_state.clicked_lat:
         radius=500,
         color="blue",
         fill=True
-    ).add_to(selector_map)
+    ).add_to(m)
 
-map_data = st_folium(selector_map, height=350, width=800)
+map_data = st_folium(
+    m,
+    height=350,
+    width=900
+)
 
 if map_data and map_data.get("last_clicked"):
-    st.session_state.clicked_lat = map_data["last_clicked"]["lat"]
-    st.session_state.clicked_lon = map_data["last_clicked"]["lng"]
 
-col1, col2 = st.columns(2)
+    st.session_state.clicked_lat = (
+        map_data["last_clicked"]["lat"]
+    )
 
-with col1:
-    st.write("Latitude:", st.session_state.clicked_lat)
+    st.session_state.clicked_lon = (
+        map_data["last_clicked"]["lng"]
+    )
 
-with col2:
-    st.write("Longitude:", st.session_state.clicked_lon)
+st.write(
+    "Selected:",
+    st.session_state.clicked_lat,
+    st.session_state.clicked_lon
+)
 
-# -----------------------------
-# ANALYSIS
-# -----------------------------
+# =====================================================
+# RUN
+# =====================================================
+
 if st.button("Run Analysis"):
 
     if st.session_state.clicked_lat is None:
-        st.error("Select a point first.")
-        st.stop()
 
-    lat = st.session_state.clicked_lat
-    lon = st.session_state.clicked_lon
-
-    with st.spinner("Running Earth Engine analysis..."):
-        st.session_state["results"] = run_analysis(lat, lon)
-
-        roi = ee.Geometry.Point([lon, lat]).buffer(1000)
-
-        buildings = (
-            ee.FeatureCollection(
-                "projects/sat-io/open-datasets/MSBuildings/India"
-            )
-            .filterBounds(roi)
+        st.error(
+            "Please select a location first."
         )
 
-        buildings = buildings.filter(
-            ee.Filter.gte("area", 16)
-        )
+    else:
 
-        open_buildings = (
-            ee.ImageCollection(
-                "GOOGLE/Research/open-buildings-temporal/v1"
-            )
-            .filterBounds(roi)
-            .select("building_height")
-            .median()
-            .clip(roi)
-        )
+        with st.spinner("Running analysis..."):
 
-        def assign_height(f):
-
-            stats = open_buildings.reduceRegion(
-                reducer=ee.Reducer.median(),
-                geometry=f.geometry(),
-                scale=4,
-                bestEffort=True,
-                maxPixels=1e10
+            st.session_state.results = run_analysis(
+                st.session_state.clicked_lat,
+                st.session_state.clicked_lon
             )
 
-            h = ee.Number(
-                ee.Algorithms.If(
-                    stats.contains("building_height"),
-                    stats.get("building_height"),
-                    0
-                )
-            )
+# =====================================================
+# RESULTS
+# =====================================================
 
-            floors = h.divide(3).ceil()
+if st.session_state.results:
 
-            return (
-                f.set("height_m", h)
-                 .set("floors", floors)
-            )
+    r = st.session_state.results
 
-        buildings_h = buildings.map(assign_height)
+    st.header("Results")
 
-        roads = (
-            ee.FeatureCollection(
-                "projects/sat-io/open-datasets/GRIP4/South-East-Asia"
-            )
-            .filterBounds(roi)
-        )
+    c1, c2, c3, c4 = st.columns(4)
 
-        roads_poly = roads.map(
-            lambda f: f.buffer(7)
-        )
+    c1.metric(
+        "Buildings (ha)",
+        round(r["building"], 2)
+    )
 
-        s2 = (
-            ee.ImageCollection(
-                "COPERNICUS/S2_SR_HARMONIZED"
-            )
-            .filterBounds(roi)
-            .filterDate("2024-01-01", "2024-12-31")
-            .filter(
-                ee.Filter.lt(
-                    "CLOUDY_PIXEL_PERCENTAGE",
-                    20
-                )
-            )
-            .select(["B4", "B8"])
-            .median()
-            .clip(roi)
-        )
+    c2.metric(
+        "Roads (ha)",
+        round(r["roads"], 2)
+    )
 
-        ndvi = s2.normalizedDifference(["B8", "B4"])
+    c3.metric(
+        "Vegetation (ha)",
+        round(r["veg"], 2)
+    )
 
-        vegetation_mask = ndvi.gt(0.35).unmask(0)
+    c4.metric(
+        "Open Space (ha)",
+        round(r["open"], 2)
+    )
 
-        def area_image(mask):
+    st.write(
+        f"Average Height: {r['avg_height']:.2f} m"
+    )
 
-            stats = (
-                mask.multiply(ee.Image.pixelArea())
-                .rename("a")
-                .reduceRegion(
-                    reducer=ee.Reducer.sum(),
-                    geometry=roi,
-                    scale=10,
-                    bestEffort=True,
-                    maxPixels=1e10
-                )
-            )
+    st.write(
+        f"Average Floors: {r['avg_floors']:.2f}"
+    )
 
-            return ee.Number(
-                ee.Algorithms.If(
-                    stats.contains("a"),
-                    stats.get("a"),
-                    0
-                )
-            ).divide(1e4)
+    st.write(
+        f"Built-up Proxy: {r['builtup']:.2f} ha"
+    )
 
-        building_mask = (
-            buildings_h
-            .map(lambda f: f.set("m", 1))
-            .reduceToImage(["m"], ee.Reducer.max())
-            .unmask(0)
-        )
+    st.write(
+        f"FAR Proxy: {r['far']:.2f}"
+    )
 
-        road_mask = (
-            roads_poly
-            .map(lambda f: f.set("m", 1))
-            .reduceToImage(["m"], ee.Reducer.max())
-            .unmask(0)
-        )
+    # -------------------------------------------------
+    # POLAR CHART
+    # -------------------------------------------------
 
-        building_area = (
-            buildings.geometry()
-            .area()
-            .divide(1e4)
-        )
+    labels = [
+        "Buildings",
+        "Roads",
+        "Vegetation",
+        "Open",
+        "Built-up"
+    ]
 
-        roads_area = (
-            roads_poly.geometry()
-            .area()
-            .divide(1e4)
-        )
+    values = [
+        r["building"],
+        r["roads"],
+        r["veg"],
+        r["open"],
+        r["builtup"]
+    ]
 
-        vegetation_area = area_image(
-            vegetation_mask
-        )
+    angles = np.linspace(
+        0,
+        2*np.pi,
+        len(values),
+        endpoint=False
+    )
 
-        total_area = roi.area().divide(1e4)
+    fig = plt.figure(figsize=(5, 5))
+    ax = fig.add_subplot(
+        111,
+        polar=True
+    )
 
-        occupied = (
-            building_mask
-            .Or(road_mask)
-            .Or(vegetation_mask)
-        )
+    ax.bar(
+        angles,
+        values,
+        width=0.6
+    )
 
-        open_mask = ee.Image.constant(1).clip(roi)
-        open_mask = open_mask.updateMask(
-            occupied.Not()
-        )
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
 
-        open_area = area_image(
-            open_mask.unmask(0)
-        )
+    st.pyplot(fig)
 
-        avg_height = ee.Number(
-            ee.Algorithms.If(
-                buildings_h.aggregate_mean("height_m"),
-                buildings_h.aggregate_mean("height_m"),
-                0
-            )
-        )
+    # -------------------------------------------------
+    # RESULT MAP
+    # -------------------------------------------------
 
-        avg_floors = ee.Number(
-            ee.Algorithms.If(
-                buildings_h.aggregate_mean("floors"),
-                buildings_h.aggregate_mean("floors"),
-                0
-            )
-        )
+    st.subheader("Map")
 
-        builtup_proxy = (
-            building_area.multiply(avg_floors)
-        )
+    rm = folium.Map(
+        location=[r["lat"], r["lon"]],
+        zoom_start=15
+    )
 
-        far_proxy = (
-            builtup_proxy.divide(total_area)
-        )
+    rm.add_ee_layer(
+        r["building_mask"],
+        {"palette": ["red"]},
+        "Buildings"
+    )
 
-        results = {
-            "total": float(total_area.getInfo()),
-            "building": float(building_area.getInfo()),
-            "roads": float(roads_area.getInfo()),
-            "veg": float(vegetation_area.getInfo()),
-            "open": float(open_area.getInfo()),
-            "avg_height": float(avg_height.getInfo()),
-            "avg_floors": float(avg_floors.getInfo()),
-            "builtup": float(builtup_proxy.getInfo()),
-            "far": float(far_proxy.getInfo())
-        }
+    rm.add_ee_layer(
+        r["road_mask"],
+        {"palette": ["gray"]},
+        "Roads"
+    )
 
-        st.header("Summary")
+    rm.add_ee_layer(
+        r["veg_mask"],
+        {"palette": ["green"]},
+        "Vegetation"
+    )
 
-        c1, c2, c3 = st.columns(3)
+    rm.add_ee_layer(
+        r["open_mask"],
+        {"palette": ["yellow"]},
+        "Open"
+    )
 
-        c1.metric("Buildings (ha)", round(results["building"],2))
-        c2.metric("Vegetation (ha)", round(results["veg"],2))
-        c3.metric("Open Space (ha)", round(results["open"],2))
+    folium.LayerControl().add_to(rm)
 
-        st.write(results)
-
-        labels = [
-            "Buildings",
-            "Roads",
-            "Vegetation",
-            "Open",
-            "Built-up"
-        ]
-
-        values = [
-            results["building"],
-            results["roads"],
-            results["veg"],
-            results["open"],
-            results["builtup"]
-        ]
-
-        angles = np.linspace(
-            0,
-            2*np.pi,
-            len(values),
-            endpoint=False
-        )
-
-        fig = plt.figure(figsize=(5,5))
-        ax = fig.add_subplot(
-            111,
-            polar=True
-        )
-
-        ax.bar(
-            angles,
-            values,
-            width=0.6
-        )
-
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-
-        st.pyplot(fig)
-
-        st.header("Interactive Map")
-
-        m = folium.Map(
-            location=[lat, lon],
-            zoom_start=15
-        )
-
-        m.add_ee_layer(
-            building_mask.selfMask(),
-            {"palette":["red"]},
-            "Buildings"
-        )
-
-        m.add_ee_layer(
-            road_mask.selfMask(),
-            {"palette":["gray"]},
-            "Roads"
-        )
-
-        m.add_ee_layer(
-            vegetation_mask.selfMask(),
-            {"palette":["green"]},
-            "Vegetation"
-        )
-
-        m.add_ee_layer(
-            open_mask.selfMask(),
-            {"palette":["yellow"]},
-            "Open Space"
-        )
-
-        folium.LayerControl().add_to(m)
-
-        st_folium(
-            m,
-            height=600,
-            width=1000
-        )
+    st_folium(
+        rm,
+        height=600,
+        width=1000
+    )
